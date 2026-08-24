@@ -57,9 +57,9 @@ A practical healthcare management MVP built with FastAPI, SQLAlchemy, PostgreSQL
 
 ## Demo accounts
 
-- Admin: admin@example.com / admin123
-- Doctor: doctor@example.com / doctor123
-- Patient: patient@example.com / secret123
+- Admin: admin@example.com / Admin123!
+- Doctor: doctor@example.com / Doctor123!
+- Patient: patient@example.com / Patient123!
 
 ## Environment variables
 

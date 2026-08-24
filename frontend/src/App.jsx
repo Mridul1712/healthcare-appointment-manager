@@ -46,7 +46,7 @@ function AuthLayout({ children, logout, role }) {
 }
 
 function LoginPage({ onLogin, onSwitchToRegister }) {
-  const [form, setForm] = useState({ email: 'patient@example.com', password: 'secret123' });
+  const [form, setForm] = useState({ email: 'patient@example.com', password: 'Patient123!' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -70,9 +70,9 @@ function LoginPage({ onLogin, onSwitchToRegister }) {
         <p className="eyebrow">Healthcare portal</p>
         <h1>Welcome back</h1>
         <div className="credential-pills">
-          <span>Patient: patient@example.com / secret123</span>
-          <span>Doctor: doctor@example.com / doctor123</span>
-          <span>Admin: admin@example.com / admin123</span>
+          <span>Patient: patient@example.com / Patient123!</span>
+          <span>Doctor: doctor@example.com / Doctor123!</span>
+          <span>Admin: admin@example.com / Admin123!</span>
         </div>
         <form onSubmit={submit} className="form-grid">
           <label>
@@ -95,7 +95,7 @@ function LoginPage({ onLogin, onSwitchToRegister }) {
 }
 
 function RegisterPage({ onRegister, onSwitchToLogin }) {
-  const [form, setForm] = useState({ email: 'newpatient@example.com', password: 'secret123', full_name: 'New Patient' });
+  const [form, setForm] = useState({ email: 'newpatient@example.com', password: 'Patient123!', full_name: 'New Patient' });
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -145,15 +145,20 @@ function RegisterPage({ onRegister, onSwitchToLogin }) {
 function DoctorCard({ doctor, onSelect }) {
   return (
     <div className="doctor-card info-card">
-      <div>
-        <p className="eyebrow">{doctor.specialization}</p>
-        <h3>{doctor.name}</h3>
-        <p>{doctor.qualification || 'Qualification not listed'}</p>
+      <div className="doctor-header">
+        <img src={doctor.profile_photo_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80'} alt={doctor.name} className="doctor-avatar" />
+        <div>
+          <p className="eyebrow">{doctor.specialization}</p>
+          <h3>{doctor.name}</h3>
+          <p>{doctor.qualification || 'Qualification not listed'}</p>
+        </div>
       </div>
       <div className="doctor-meta">
         <span>{doctor.experience_years || 0} years</span>
         <span>{doctor.slot_duration_minutes || 30} min slots</span>
+        <span>{doctor.status || 'available'}</span>
       </div>
+      <p className="muted-text">{doctor.clinic_name || 'Primary care clinic'}</p>
       <button className="secondary-button" onClick={() => onSelect(doctor)}>View profile</button>
     </div>
   );
@@ -165,16 +170,48 @@ function PatientDashboard({ auth }) {
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
   const [slots, setSlots] = useState([]);
   const [selectedSlot, setSelectedSlot] = useState('');
-  const [bookingSummary, setBookingSummary] = useState(null);
-  const [symptomForm, setSymptomForm] = useState({ chief_complaint: 'Fever', symptoms: 'Body ache and mild cough', duration: '2 days', severity: 'Medium', additional_notes: 'Worse in evenings' });
+  const [bookingStep, setBookingStep] = useState('select');
+  const [bookingError, setBookingError] = useState('');
+  const [symptomForm, setSymptomForm] = useState({
+    chief_complaint: '',
+    symptoms: '',
+    duration: '2 days',
+    severity: 'Medium',
+    additional_notes: '',
+  });
   const [summary, setSummary] = useState(null);
+  const [bookingSuccess, setBookingSuccess] = useState(null);
+  const [holdInfo, setHoldInfo] = useState(null);
+
+  const formatShortDate = (value) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  };
+
+  const formatDisplayTime = (value) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  };
+
+  const fetchDoctors = async () => {
+    try {
+      const response = await api.get('/doctors');
+      setDoctors(response.data || []);
+    } catch {
+      setDoctors([]);
+    }
+  };
 
   useEffect(() => {
-    api.get('/doctors').then((response) => setDoctors(response.data)).catch(() => setDoctors([]));
+    fetchDoctors();
   }, []);
 
   useEffect(() => {
-    if (!selectedDoctor) return;
+    if (!selectedDoctor || !selectedDoctor.id) return;
     api.get(`/doctors/${selectedDoctor.id}/availability`, { params: { date: selectedDate } })
       .then((response) => {
         setSlots(response.data.slots || []);
@@ -183,24 +220,113 @@ function PatientDashboard({ auth }) {
       .catch(() => setSlots([]));
   }, [selectedDoctor, selectedDate]);
 
-  const bookAppointment = async () => {
-    if (!selectedDoctor || !selectedSlot) return;
-    const appointmentTime = new Date(`${selectedDate}T${selectedSlot}:00`).toISOString();
+  const openDoctorProfile = async (doctor) => {
+    setBookingError('');
+    setBookingSuccess(null);
+    setSummary(null);
+    setBookingStep('select');
+    setSelectedDate(new Date().toISOString().split('T')[0]);
+    setSelectedSlot('');
+    setHoldInfo(null);
+    setSymptomForm({
+      chief_complaint: '',
+      symptoms: '',
+      duration: '2 days',
+      severity: 'Medium',
+      additional_notes: '',
+    });
+
     try {
-      const response = await api.post('/appointments', { doctor_id: selectedDoctor.id, start_time: appointmentTime });
-      setBookingSummary(response.data);
-      setSummary(null);
-    } catch (error) {
-      setBookingSummary({ error: error.response?.data?.detail || 'Slot is no longer available.' });
+      const response = await api.get(`/doctors/${doctor.id}`);
+      setSelectedDoctor({ ...doctor, ...response.data });
+    } catch {
+      setSelectedDoctor(doctor);
     }
   };
 
-  const submitSymptoms = async () => {
-    if (!bookingSummary || bookingSummary.error) return;
-    const response = await api.post(`/appointments/${bookingSummary.id}/symptoms`, symptomForm);
-    const detail = await api.get(`/appointments/${bookingSummary.id}/pre-visit-summary`);
-    setSummary({ ...response.data, detail: detail.data });
+  const reserveSlot = async (slot) => {
+    if (!selectedDoctor) return;
+    setSelectedSlot(slot);
+    setBookingError('');
+    try {
+      const response = await api.post('/appointments/hold', {
+        doctor_id: selectedDoctor.id,
+        start_time: slot,
+      });
+      setHoldInfo(response.data);
+    } catch (error) {
+      const detail = error.response?.data?.detail || 'Unable to reserve this slot right now.';
+      setBookingError(detail);
+    }
   };
+
+  const startSymptomStep = () => {
+    if (!selectedDoctor || !selectedSlot) {
+      setBookingError('Please select an available appointment slot.');
+      return;
+    }
+    setBookingError('');
+    setSummary(null);
+    setBookingStep('symptoms');
+  };
+
+  const continueToReview = () => {
+    if (!symptomForm.chief_complaint || !symptomForm.symptoms) {
+      setBookingError('Please enter your chief complaint and symptoms before continuing.');
+      return;
+    }
+    setBookingError('');
+    setBookingStep('review');
+  };
+
+  const confirmBooking = async () => {
+    if (!selectedDoctor || !selectedSlot) {
+      setBookingError('Please select an available slot before confirming.');
+      return;
+    }
+
+    setBookingError('');
+    setBookingStep('review');
+
+    try {
+      const response = await api.post('/appointments', {
+        doctor_id: selectedDoctor.id,
+        start_time: selectedSlot,
+      });
+
+      const appointment = response.data;
+      try {
+        const symptomResponse = await api.post(`/appointments/${appointment.id}/symptoms`, symptomForm);
+        setSummary(symptomResponse.data.summary || { fallback: true, detail: { message: 'AI summary is currently unavailable. Your symptoms will still be saved for the doctor.' } });
+      } catch (symptomError) {
+        setSummary({
+          fallback: true,
+          detail: {
+            message: 'AI summary is currently unavailable. Your symptoms will still be saved for the doctor.',
+          },
+        });
+      }
+
+      setBookingSuccess({
+        id: appointment.id,
+        doctor: selectedDoctor,
+        start_time: appointment.start_time,
+        date: selectedDate,
+      });
+      setBookingStep('success');
+      setSelectedSlot('');
+      setHoldInfo(null);
+      setSlots([]);
+    } catch (error) {
+      const detail = error.response?.data?.detail || 'Unable to book the appointment right now. Please try again.';
+      setBookingError(detail);
+      setBookingStep('symptoms');
+    }
+  };
+
+  const currentDoctorLeave = selectedDoctor?.leave_days?.length
+    ? selectedDoctor.leave_days.find((leave) => leave.leave_date && leave.leave_date >= selectedDate)
+    : null;
 
   return (
     <div>
@@ -219,54 +345,175 @@ function PatientDashboard({ auth }) {
 
       <div className="card-list">
         {doctors.map((doctor) => (
-          <DoctorCard key={doctor.id} doctor={doctor} onSelect={setSelectedDoctor} />
+          <DoctorCard key={doctor.id} doctor={doctor} onSelect={openDoctorProfile} />
         ))}
       </div>
 
       {selectedDoctor && (
-        <div className="booking-panel">
-          <h3>{selectedDoctor.name}</h3>
-          <p>{selectedDoctor.specialization}</p>
-          <div className="booking-row">
-            <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} />
-          </div>
-          <div className="slot-list">
-            {slots.length === 0 ? <div className="info-box">No slots available for this date.</div> : slots.map((slot) => (
-              <button key={slot} type="button" className={selectedSlot === slot ? 'slot-button selected' : 'slot-button'} onClick={() => setSelectedSlot(slot)}>{slot.replace('T', ' ')}</button>
-            ))}
-          </div>
-          <button className="primary-button" onClick={bookAppointment}>Book this appointment</button>
-        </div>
-      )}
+        <div className="doctor-profile-overlay" onClick={() => setSelectedDoctor(null)}>
+          <div className="doctor-profile-panel" onClick={(event) => event.stopPropagation()}>
+            <div className="profile-header-row">
+              <div className="doctor-header">
+                <img src={selectedDoctor.profile_photo_url || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80'} alt={selectedDoctor.name} className="doctor-avatar large" />
+                <div>
+                  <p className="eyebrow">{selectedDoctor.specialization}</p>
+                  <h3>{selectedDoctor.name}</h3>
+                  <p>{selectedDoctor.qualification || 'Qualification not listed'}</p>
+                </div>
+              </div>
+              <button type="button" className="secondary-button" onClick={() => setSelectedDoctor(null)}>Close Profile</button>
+            </div>
 
-      {bookingSummary && !bookingSummary.error && (
-        <div className="booking-panel">
-          <h3>Appointment booked</h3>
-          <p>Appointment ID: {bookingSummary.id}</p>
-          <p>Doctor: {bookingSummary.doctor_id}</p>
-          <p>Time: {bookingSummary.start_time}</p>
+            <div className="doctor-meta">
+              <span>{selectedDoctor.experience_years || 0} years experience</span>
+              <span>{selectedDoctor.languages || 'English'}</span>
+              <span>₹{selectedDoctor.consultation_fee || 0}</span>
+              <span>{selectedDoctor.slot_duration_minutes || 30} min</span>
+            </div>
 
-          <div className="symptom-form">
-            <h4>Patient symptom form</h4>
-            <label>Chief complaint<input value={symptomForm.chief_complaint} onChange={(e) => setSymptomForm({ ...symptomForm, chief_complaint: e.target.value })} /></label>
-            <label>Symptoms<textarea value={symptomForm.symptoms} onChange={(e) => setSymptomForm({ ...symptomForm, symptoms: e.target.value })} /></label>
-            <label>Duration<input value={symptomForm.duration} onChange={(e) => setSymptomForm({ ...symptomForm, duration: e.target.value })} /></label>
-            <label>Severity<select value={symptomForm.severity} onChange={(e) => setSymptomForm({ ...symptomForm, severity: e.target.value })}><option>Low</option><option>Medium</option><option>High</option></select></label>
-            <label>Additional notes<textarea value={symptomForm.additional_notes} onChange={(e) => setSymptomForm({ ...symptomForm, additional_notes: e.target.value })} /></label>
-            <button onClick={submitSymptoms}>Send symptoms for AI pre-visit summary</button>
+            <p className="muted-text">{selectedDoctor.clinic_name || 'Clinic'}</p>
+            <p>{selectedDoctor.bio || 'Experienced doctor focused on patient-first care.'}</p>
+
+            {selectedDoctor.working_hours && selectedDoctor.working_hours.length > 0 && (
+              <div className="profile-section">
+                <h4>Working Hours</h4>
+                <div className="working-hours-grid">
+                  {Array.from({ length: 7 }, (_, index) => {
+                    const dayHours = selectedDoctor.working_hours.filter((item) => item.weekday === index);
+                    if (!dayHours.length) return null;
+                    return (
+                      <div key={index} className="schedule-day">
+                        <strong>{['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][index]}</strong>
+                        {dayHours.map((item) => (
+                          <div key={`${index}-${item.start_time}-${item.end_time}`}>
+                            {item.start_time} – {item.end_time}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {selectedDoctor.leave_days && selectedDoctor.leave_days.length > 0 && (
+              <div className="profile-section">
+                <h4>Leave Information</h4>
+                <ul className="leave-list">
+                  {selectedDoctor.leave_days.map((leave) => (
+                    <li key={leave.id || leave.leave_date}>
+                      {leave.leave_date} — {leave.reason || 'Doctor leave'}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {currentDoctorLeave && (
+              <div className="info-box">Doctor is on leave on this date.</div>
+            )}
+
+            <div className="profile-section">
+              <h4>Available Appointments</h4>
+              <div className="booking-row">
+                <label>
+                  Select date
+                  <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} />
+                </label>
+              </div>
+
+              {bookingError && <div className="error-box">{bookingError}</div>}
+              {holdInfo && <div className="info-box">Slot reserved for you for 5 minutes.</div>}
+
+              <div className="slot-list">
+                {slots.length === 0 ? (
+                  <div className="info-box">No slots available for this date.</div>
+                ) : (
+                  slots.map((slot) => (
+                    <button
+                      key={slot}
+                      type="button"
+                      className={selectedSlot === slot ? 'slot-button selected' : 'slot-button'}
+                      onClick={() => reserveSlot(slot)}
+                    >
+                      {formatDisplayTime(slot)}
+                    </button>
+                  ))
+                )}
+              </div>
+
+              {selectedSlot && bookingStep === 'select' && (
+                <div className="booking-actions">
+                  <button className="primary-button" type="button" onClick={startSymptomStep}>Book Appointment</button>
+                </div>
+              )}
+            </div>
+
+            {bookingStep === 'symptoms' && (
+              <div className="booking-panel symptom-step">
+                <h3>Confirm Appointment</h3>
+                <p><strong>Doctor:</strong> {selectedDoctor.name}</p>
+                <p><strong>Date:</strong> {formatShortDate(selectedDate)}</p>
+                <p><strong>Time:</strong> {formatDisplayTime(selectedSlot)}</p>
+                <p>Before confirming your appointment, please describe your symptoms.</p>
+
+                <div className="symptom-form">
+                  <label>Chief complaint<input value={symptomForm.chief_complaint} onChange={(e) => setSymptomForm({ ...symptomForm, chief_complaint: e.target.value })} /></label>
+                  <label>Symptoms<textarea value={symptomForm.symptoms} onChange={(e) => setSymptomForm({ ...symptomForm, symptoms: e.target.value })} /></label>
+                  <label>Duration<input value={symptomForm.duration} onChange={(e) => setSymptomForm({ ...symptomForm, duration: e.target.value })} /></label>
+                  <label>Severity<select value={symptomForm.severity} onChange={(e) => setSymptomForm({ ...symptomForm, severity: e.target.value })}><option>Low</option><option>Medium</option><option>High</option></select></label>
+                  <label>Additional notes<textarea value={symptomForm.additional_notes} onChange={(e) => setSymptomForm({ ...symptomForm, additional_notes: e.target.value })} /></label>
+                </div>
+
+                <div className="booking-actions">
+                  <button className="secondary-button" type="button" onClick={() => setBookingStep('select')}>Cancel</button>
+                  <button className="primary-button" type="button" onClick={continueToReview}>Continue</button>
+                </div>
+              </div>
+            )}
+
+            {bookingStep === 'review' && (
+              <div className="booking-panel symptom-step">
+                <h3>Appointment Summary</h3>
+                <p><strong>Doctor:</strong> {selectedDoctor.name}</p>
+                <p><strong>Date:</strong> {formatShortDate(selectedDate)}</p>
+                <p><strong>Time:</strong> {formatDisplayTime(selectedSlot)}</p>
+                <p><strong>Symptoms:</strong> {symptomForm.symptoms}</p>
+                {summary && summary.fallback ? (
+                  <div className="info-box">AI summary is currently unavailable. Your symptoms will still be saved for the doctor.</div>
+                ) : summary ? (
+                  <div>
+                    <p><strong>AI Pre-Visit Summary:</strong></p>
+                    <p><strong>Urgency:</strong> {summary.detail?.urgency_level || summary.urgency_level || 'Unavailable'}</p>
+                    <p>{summary.detail?.message || summary.message || 'Summary captured successfully.'}</p>
+                  </div>
+                ) : (
+                  <div className="info-box">Your symptoms will be saved and an AI summary will be generated if available.</div>
+                )}
+
+                <div className="booking-actions">
+                  <button className="secondary-button" type="button" onClick={() => setBookingStep('symptoms')}>Go Back</button>
+                  <button className="primary-button" type="button" onClick={confirmBooking}>Confirm Appointment</button>
+                </div>
+              </div>
+            )}
+
+            {bookingStep === 'success' && bookingSuccess && (
+              <div className="booking-panel success-box">
+                <h3>Appointment Confirmed ✓</h3>
+                <p>Your appointment has been successfully booked.</p>
+                <p><strong>Doctor:</strong> {bookingSuccess.doctor.name}</p>
+                <p><strong>Date:</strong> {formatShortDate(bookingSuccess.start_time || bookingSuccess.date)}</p>
+                <p><strong>Time:</strong> {formatDisplayTime(bookingSuccess.start_time)}</p>
+                <p><strong>Appointment ID:</strong> {bookingSuccess.id}</p>
+
+                <div className="booking-actions">
+                  <button className="primary-button" type="button" onClick={() => setSelectedDoctor(null)}>Back to Doctors</button>
+                  <button className="secondary-button" type="button" onClick={() => window.location.hash = '#appointments'}>View My Appointments</button>
+                </div>
+              </div>
+            )}
           </div>
-        </div>
-      )}
-
-      {summary && (
-        <div className="booking-panel">
-          <h3>AI-generated pre-visit summary</h3>
-          <p className="muted">AI-generated administrative/clinical-support summary. It is not a diagnosis.</p>
-          <p><strong>Urgency:</strong> {summary.detail?.urgency_level || 'Unavailable'}</p>
-          <p><strong>Chief complaint:</strong> {summary.detail?.chief_complaint || 'Unavailable'}</p>
-          <ul>
-            {(summary.detail?.suggested_questions || []).map((question) => <li key={question}>{question}</li>)}
-          </ul>
         </div>
       )}
     </div>
@@ -322,7 +569,7 @@ function DoctorDashboard() {
 
 function AdminPanel() {
   const [doctors, setDoctors] = useState([]);
-  const [doctorForm, setDoctorForm] = useState({ email: 'newdoctor@example.com', password: 'doctor123', full_name: 'Dr. Emma Brooks', specialization: 'Neurology', qualification: 'MD Neurology', experience_years: 7, slot_duration_minutes: 30 });
+  const [doctorForm, setDoctorForm] = useState({ email: 'newdoctor@example.com', password: 'Doctor123!', full_name: 'Dr. Emma Brooks', specialization: 'Neurology', qualification: 'MD Neurology', experience_years: 7, slot_duration_minutes: 30 });
   const [leaveDate, setLeaveDate] = useState('');
   const [leaveReason, setLeaveReason] = useState('Annual leave');
 
@@ -376,21 +623,298 @@ function AdminPanel() {
 function AppointmentsPage({ auth }) {
   const [appointments, setAppointments] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [selectedAppointment, setSelectedAppointment] = useState(null);
+  const [details, setDetails] = useState(null);
+  const [rescheduleDate, setRescheduleDate] = useState('');
+  const [rescheduleSlots, setRescheduleSlots] = useState([]);
+  const [selectedRescheduleSlot, setSelectedRescheduleSlot] = useState('');
+
+  const formatDateLabel = (value) => {
+    if (!value) return '';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  };
+
+  const formatTimeRange = (start, end) => {
+    if (!start || !end) return '';
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+    if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) return '';
+    return `${startDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })} – ${endDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}`;
+  };
+
+  const statusMeta = {
+    CONFIRMED: { label: 'Confirmed', tone: 'success' },
+    COMPLETED: { label: 'Completed', tone: 'secondary' },
+    CANCELLED: { label: 'Cancelled', tone: 'danger' },
+    RESCHEDULED: { label: 'Rescheduled', tone: 'info' },
+    DOCTOR_LEAVE: { label: 'Doctor on Leave', tone: 'warning' },
+    PENDING: { label: 'Pending', tone: 'secondary' },
+  };
+
+  const loadAppointments = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const response = await api.get('/appointments');
+      setAppointments(response.data || []);
+    } catch {
+      setAppointments([]);
+      setError('Unable to load your appointments. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    api.get('/appointments').then((response) => setAppointments(response.data)).catch(() => setAppointments([])).finally(() => setLoading(false));
+    loadAppointments();
   }, []);
+
+  const openDetails = async (appointment) => {
+    try {
+      const response = await api.get(`/appointments/${appointment.id}`);
+      setDetails(response.data);
+      setSelectedAppointment(appointment);
+    } catch {
+      setDetails(appointment);
+      setSelectedAppointment(appointment);
+    }
+  };
+
+  const handleCancel = async (appointment) => {
+    const confirmed = window.confirm(`Are you sure you want to cancel your appointment with ${appointment.doctor?.name || 'your doctor'} on ${formatDateLabel(appointment.start_time)} at ${formatTimeRange(appointment.start_time, appointment.end_time)}?`);
+    if (!confirmed) return;
+    try {
+      await api.post(`/appointments/${appointment.id}/cancel`);
+      await loadAppointments();
+      setSelectedAppointment(null);
+      setDetails(null);
+    } catch {
+      setError('Unable to cancel this appointment right now. Please try again.');
+    }
+  };
+
+  const startReschedule = async (appointment) => {
+    const nextDate = appointment.start_time ? new Date(appointment.start_time).toISOString().split('T')[0] : '';
+    setSelectedAppointment(appointment);
+    setDetails(null);
+    setRescheduleDate(nextDate);
+    if (appointment.doctor?.id) {
+      try {
+        const response = await api.get(`/doctors/${appointment.doctor.id}/availability`, { params: { date: nextDate } });
+        setRescheduleSlots(response.data.slots || []);
+      } catch {
+        setRescheduleSlots([]);
+      }
+    }
+  };
+
+  const onRescheduleDateChange = async (date) => {
+    setRescheduleDate(date);
+    const current = selectedAppointment;
+    if (!current?.doctor?.id) return;
+    try {
+      const response = await api.get(`/doctors/${current.doctor.id}/availability`, { params: { date } });
+      setRescheduleSlots(response.data.slots || []);
+    } catch {
+      setRescheduleSlots([]);
+    }
+    setSelectedRescheduleSlot('');
+  };
+
+  const submitReschedule = async () => {
+    if (!selectedAppointment || !selectedRescheduleSlot) return;
+    try {
+      await api.patch(`/appointments/${selectedAppointment.id}/reschedule`, { start_time: selectedRescheduleSlot });
+      await loadAppointments();
+      setSelectedAppointment(null);
+      setDetails(null);
+      setRescheduleDate('');
+      setRescheduleSlots([]);
+      setSelectedRescheduleSlot('');
+    } catch (error) {
+      setError(error.response?.data?.detail || 'Unable to reschedule this appointment. Please try again.');
+    }
+  };
+
+  const upcomingAppointments = appointments.filter((appointment) => new Date(appointment.start_time) >= new Date());
+  const pastAppointments = appointments.filter((appointment) => new Date(appointment.start_time) < new Date());
+
+  const renderAppointmentCard = (appointment) => {
+    const doctor = appointment.doctor || {};
+    const meta = statusMeta[appointment.status] || { label: appointment.status, tone: 'secondary' };
+    return (
+      <div key={appointment.id} className="appointment-card">
+        <div className="appointment-card-header">
+          <div className="doctor-header compact">
+            <img src={doctor.photo || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80'} alt={doctor.name || 'Doctor'} className="doctor-avatar small" />
+            <div>
+              <h3>{doctor.name || 'Doctor'}</h3>
+              <p>{doctor.specialization || 'Specialist'}</p>
+              <p className="muted-text">{doctor.qualification || 'Qualification not listed'}</p>
+            </div>
+          </div>
+          <span className={`status-badge ${meta.tone}`}>{meta.label}</span>
+        </div>
+
+        <div className="appointment-meta-block">
+          <div><strong>📅</strong> {formatDateLabel(appointment.start_time)}</div>
+          <div><strong>🕐</strong> {formatTimeRange(appointment.start_time, appointment.end_time)}</div>
+          <div><strong>📍</strong> {doctor.clinic || appointment.clinic || 'Clinic address unavailable'}</div>
+        </div>
+
+        <div className="appointment-actions">
+          <button className="secondary-button" onClick={() => openDetails(appointment)}>View Details</button>
+          <button className="secondary-button" onClick={() => startReschedule(appointment)}>Reschedule</button>
+          <button className="danger-button" onClick={() => handleCancel(appointment)}>Cancel Appointment</button>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div>
-      <div className="page-header"><div><p className="eyebrow">Appointments</p><h1>{roleLabels[auth?.user?.role] || 'Appointments'}</h1></div></div>
-      {loading ? <div className="info-box">Loading appointments...</div> : appointments.length === 0 ? <div className="info-box">No appointments found.</div> : appointments.map((appointment) => (
-        <div key={appointment.id} className="info-card">
-          <h3>{appointment.doctor_id}</h3>
-          <p>{appointment.start_time}</p>
-          <p>Status: {appointment.status}</p>
+      <div className="page-header">
+        <div>
+          <p className="eyebrow">Appointments</p>
+          <h1>{roleLabels[auth?.user?.role] || 'Appointments'}</h1>
         </div>
-      ))}
+      </div>
+
+      {error && <div className="error-box">{error}</div>}
+
+      {loading ? (
+        <div className="info-box">Loading appointments...</div>
+      ) : appointments.length === 0 ? (
+        <div className="empty-state">
+          <h3>No appointments yet</h3>
+          <p>Find a doctor and book your first appointment.</p>
+          <button className="primary-button" type="button" onClick={() => window.location.href = '/doctors'}>Find a Doctor</button>
+        </div>
+      ) : (
+        <>
+          <section className="appointments-section">
+            <h2>Upcoming Appointments</h2>
+            <div className="card-list">
+              {upcomingAppointments.length === 0 ? <div className="info-box">You don't have any upcoming appointments.</div> : upcomingAppointments.map(renderAppointmentCard)}
+            </div>
+          </section>
+
+          {pastAppointments.length > 0 && (
+            <section className="appointments-section">
+              <h2>Past Appointments</h2>
+              <div className="card-list">
+                {pastAppointments.map(renderAppointmentCard)}
+              </div>
+            </section>
+          )}
+        </>
+      )}
+
+      {selectedAppointment && !rescheduleDate && (
+        <div className="doctor-profile-overlay" onClick={() => { setSelectedAppointment(null); setDetails(null); }}>
+          <div className="doctor-profile-panel" onClick={(event) => event.stopPropagation()}>
+            <div className="profile-header-row">
+              <h3>Appointment Details</h3>
+              <button type="button" className="secondary-button" onClick={() => { setSelectedAppointment(null); setDetails(null); }}>Close</button>
+            </div>
+
+            {(details || selectedAppointment) && (() => {
+              const current = details || selectedAppointment;
+              const doctor = current.doctor || {};
+              const status = statusMeta[current.status] || { label: current.status, tone: 'secondary' };
+              return (
+                <div>
+                  <div className="doctor-header compact">
+                    <img src={doctor.photo || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80'} alt={doctor.name || 'Doctor'} className="doctor-avatar small" />
+                    <div>
+                      <h3>{doctor.name || 'Doctor'}</h3>
+                      <p>{doctor.specialization || 'Specialist'}</p>
+                      <p>{doctor.qualification || 'Qualification not listed'}</p>
+                    </div>
+                  </div>
+
+                  <div className="appointment-meta-block">
+                    <div><strong>Clinic:</strong> {doctor.clinic || current.clinic || 'Clinic address unavailable'}</div>
+                    <div><strong>Date:</strong> {formatDateLabel(current.start_time)}</div>
+                    <div><strong>Time:</strong> {formatTimeRange(current.start_time, current.end_time)}</div>
+                    <div><strong>Status:</strong> <span className={`status-badge ${status.tone}`}>{status.label}</span></div>
+                  </div>
+
+                  <div className="profile-section">
+                    <h4>Symptoms submitted</h4>
+                    {current.symptoms && current.symptoms.length > 0 ? (
+                      current.symptoms.map((symptom) => (
+                        <div key={symptom.id} className="symptom-note">
+                          <p><strong>Chief complaint:</strong> {symptom.chief_complaint || 'Not provided'}</p>
+                          <p><strong>Symptoms:</strong> {symptom.symptoms || 'Not provided'}</p>
+                          <p><strong>Severity:</strong> {symptom.severity || 'Not provided'}</p>
+                        </div>
+                      ))
+                    ) : (
+                      <p>No symptoms submitted yet.</p>
+                    )}
+                  </div>
+
+                  <div className="profile-section">
+                    <h4>Pre-visit AI Summary</h4>
+                    {current.pre_visit_summary ? (
+                      <div>
+                        <p><strong>Chief Complaint:</strong> {current.pre_visit_summary.chief_complaint || 'Not available'}</p>
+                        <p><strong>Urgency:</strong> {current.pre_visit_summary.urgency_level || 'Not available'}</p>
+                        <ul>
+                          {(current.pre_visit_summary.suggested_questions || []).map((question) => <li key={question}>{question}</li>)}
+                        </ul>
+                      </div>
+                    ) : (
+                      <p>AI summary is currently unavailable. Your submitted symptoms are still available to the doctor.</p>
+                    )}
+                  </div>
+
+                  <div className="appointment-actions">
+                    <button className="secondary-button" onClick={() => startReschedule(current)}>Reschedule</button>
+                    <button className="danger-button" onClick={() => handleCancel(current)}>Cancel Appointment</button>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {selectedAppointment && rescheduleDate && (
+        <div className="doctor-profile-overlay" onClick={() => { setSelectedAppointment(null); setRescheduleDate(''); setSelectedRescheduleSlot(''); setRescheduleSlots([]); }}>
+          <div className="doctor-profile-panel" onClick={(event) => event.stopPropagation()}>
+            <div className="profile-header-row">
+              <h3>Reschedule Appointment</h3>
+              <button type="button" className="secondary-button" onClick={() => { setSelectedAppointment(null); setRescheduleDate(''); setSelectedRescheduleSlot(''); setRescheduleSlots([]); }}>Close</button>
+            </div>
+            <div className="profile-section">
+              <label>
+                Select a new date
+                <input type="date" value={rescheduleDate} onChange={(e) => onRescheduleDateChange(e.target.value)} />
+              </label>
+            </div>
+            <div className="slot-list">
+              {rescheduleSlots.length === 0 ? (
+                <div className="info-box">No new slots available for this date.</div>
+              ) : (
+                rescheduleSlots.map((slot) => (
+                  <button key={slot} type="button" className={selectedRescheduleSlot === slot ? 'slot-button selected' : 'slot-button'} onClick={() => setSelectedRescheduleSlot(slot)}>
+                    {new Date(slot).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
+                  </button>
+                ))
+              )}
+            </div>
+            <div className="appointment-actions">
+              <button className="secondary-button" type="button" onClick={() => { setRescheduleDate(''); setSelectedRescheduleSlot(''); setRescheduleSlots([]); }}>Cancel</button>
+              <button className="primary-button" type="button" onClick={submitReschedule} disabled={!selectedRescheduleSlot}>Confirm Reschedule</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

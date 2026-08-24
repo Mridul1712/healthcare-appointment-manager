@@ -37,6 +37,12 @@ class DoctorCreate(BaseModel):
     qualification: Optional[str] = None
     experience_years: int = 0
     slot_duration_minutes: int = 30
+    profile_photo_url: Optional[str] = None
+    bio: Optional[str] = None
+    languages: Optional[str] = None
+    consultation_fee: Optional[int] = 0
+    clinic_name: Optional[str] = None
+    status: Optional[str] = "available"
 
 
 class DoctorWorkingHourItem(BaseModel):

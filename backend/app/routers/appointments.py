@@ -15,6 +15,29 @@ from app.services.notifications import EmailService
 router = APIRouter(prefix="/api/appointments", tags=["appointments"])
 
 
+def serialize_appointment(appointment: Appointment):
+    doctor = appointment.doctor
+    return {
+        "id": appointment.id,
+        "appointment_id": appointment.id,
+        "start_time": appointment.start_time.isoformat(),
+        "end_time": appointment.end_time.isoformat(),
+        "status": appointment.status,
+        "doctor": {
+            "id": doctor.id if doctor else None,
+            "name": doctor.name if doctor else "Doctor",
+            "specialization": doctor.specialization if doctor else "",
+            "qualification": doctor.qualification,
+            "photo": doctor.profile_photo_url if doctor else None,
+            "clinic": doctor.clinic_name if doctor else None,
+            "experience": doctor.experience_years if doctor else None,
+        } if doctor else None,
+        "clinic": doctor.clinic_name if doctor else None,
+        "symptoms_available": bool(appointment.symptoms),
+        "pre_visit_summary_available": bool(appointment.pre_visit_summary),
+    }
+
+
 @router.post("/hold")
 def create_appointment_hold(payload: SlotHoldRequest, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.role != RoleEnum.PATIENT.value:
@@ -68,12 +91,12 @@ def create_appointment(payload: AppointmentCreate, current_user: User = Depends(
 @router.get("")
 def list_appointments(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     if current_user.role == RoleEnum.PATIENT.value:
-        appointments = db.query(Appointment).filter(Appointment.patient_id == current_user.id).all()
+        appointments = db.query(Appointment).filter(Appointment.patient_id == current_user.id).order_by(Appointment.start_time.asc()).all()
     elif current_user.role == RoleEnum.DOCTOR.value:
-        appointments = db.query(Appointment).filter(Appointment.doctor_id == current_user.doctor_profile.id).all()
+        appointments = db.query(Appointment).filter(Appointment.doctor_id == current_user.doctor_profile.id).order_by(Appointment.start_time.asc()).all()
     else:
-        appointments = db.query(Appointment).all()
-    return [{"id": a.id, "doctor_id": a.doctor_id, "patient_id": a.patient_id, "status": a.status, "start_time": a.start_time.isoformat()} for a in appointments]
+        appointments = db.query(Appointment).order_by(Appointment.start_time.asc()).all()
+    return [serialize_appointment(appointment) for appointment in appointments]
 
 
 @router.get("/{appointment_id}")
@@ -85,7 +108,29 @@ def get_appointment(appointment_id: str, current_user: User = Depends(get_curren
         raise HTTPException(status_code=403, detail="Not allowed")
     if current_user.role == RoleEnum.DOCTOR.value and appointment.doctor_id != current_user.doctor_profile.id:
         raise HTTPException(status_code=403, detail="Not allowed")
-    return {"id": appointment.id, "doctor_id": appointment.doctor_id, "patient_id": appointment.patient_id, "status": appointment.status, "start_time": appointment.start_time.isoformat(), "end_time": appointment.end_time.isoformat()}
+    payload = serialize_appointment(appointment)
+    payload["patient_id"] = appointment.patient_id
+    payload["symptoms"] = [{
+        "id": symptom.id,
+        "chief_complaint": symptom.chief_complaint,
+        "symptoms": symptom.symptoms,
+        "duration": symptom.duration,
+        "severity": symptom.severity,
+        "additional_notes": symptom.additional_notes,
+    } for symptom in appointment.symptoms]
+    summary = appointment.pre_visit_summary
+    if summary:
+        payload["pre_visit_summary"] = {
+            "id": summary.id,
+            "urgency_level": summary.urgency_level,
+            "chief_complaint": summary.chief_complaint,
+            "suggested_questions": summary.suggested_questions,
+            "status": summary.status,
+            "provider_response": summary.provider_response,
+        }
+    else:
+        payload["pre_visit_summary"] = None
+    return payload
 
 
 @router.post("/{appointment_id}/symptoms")
@@ -206,6 +251,48 @@ def create_post_visit_summary(appointment_id: str, payload: dict, current_user: 
     db.add(summary)
     db.commit()
     return {"status": "saved", "summary": summary_payload}
+
+
+@router.patch("/{appointment_id}/reschedule")
+def reschedule_appointment(appointment_id: str, payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    appointment = db.query(Appointment).filter(Appointment.id == appointment_id).first()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    if current_user.role == RoleEnum.PATIENT.value and appointment.patient_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    if current_user.role == RoleEnum.DOCTOR.value and appointment.doctor_id != current_user.doctor_profile.id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+
+    new_start_time = payload.get("start_time")
+    if not new_start_time:
+        raise HTTPException(status_code=400, detail="A new start time is required")
+
+    if isinstance(new_start_time, str):
+        new_start_time = datetime.fromisoformat(new_start_time)
+
+    if new_start_time <= datetime.utcnow():
+        raise HTTPException(status_code=400, detail="The new appointment time must be in the future")
+
+    doctor = db.query(DoctorProfile).filter(DoctorProfile.id == appointment.doctor_id).first()
+    if not doctor:
+        raise HTTPException(status_code=404, detail="Doctor not found")
+
+    existing = db.query(Appointment).filter(
+        Appointment.doctor_id == appointment.doctor_id,
+        Appointment.start_time == new_start_time,
+        Appointment.id != appointment.id,
+        Appointment.status != "CANCELLED",
+    ).first()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The selected appointment slot is no longer available. Please refresh availability.")
+
+    appointment.start_time = new_start_time
+    appointment.end_time = new_start_time + timedelta(minutes=doctor.slot_duration_minutes or 30)
+    appointment.status = "RESCHEDULED"
+    db.add(AuditLog(user_id=current_user.id, action="appointment_rescheduled", details={"appointment_id": appointment_id, "new_start_time": new_start_time.isoformat()}))
+    db.commit()
+    db.refresh(appointment)
+    return serialize_appointment(appointment)
 
 
 @router.post("/{appointment_id}/cancel")
