@@ -1,13 +1,16 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import get_current_user
-from app.models.models import Appointment, AppointmentSlotHold, AuditLog, DoctorProfile, RoleEnum, SlotHoldStatus, Symptom, User
-from app.schemas import AppointmentCreate, SlotHoldRequest, SymptomCreate
+from app.models.models import Appointment, AppointmentSlotHold, AuditLog, ClinicalNote, DoctorProfile, Notification, PreVisitSummary, Prescription, PrescriptionMedication, PostVisitSummary, RoleEnum, SlotHoldStatus, Symptom, User
+from app.schemas import AppointmentCreate, ClinicalNoteCreate, PrescriptionCreate, SlotHoldRequest, SymptomCreate
 from app.services.booking import book_appointment, create_slot_hold, expire_slot_holds
+from app.services.calendar_service import CalendarService
+from app.services.llm_service import generate_post_visit_summary, generate_pre_visit_summary
+from app.services.notifications import EmailService
 
 router = APIRouter(prefix="/api/appointments", tags=["appointments"])
 
@@ -30,14 +33,36 @@ def create_appointment(payload: AppointmentCreate, current_user: User = Depends(
     if not doctor:
         raise HTTPException(status_code=404, detail="Doctor not found")
 
-    try:
-        appointment = book_appointment(db, payload.doctor_id, current_user.id, payload.start_time)
-    except HTTPException:
-        raise
-
-    db.add(AuditLog(user_id=current_user.id, action="appointment_booked", details={"doctor_id": payload.doctor_id, "start_time": payload.start_time.isoformat()}))
+    appointment = book_appointment(db, payload.doctor_id, current_user.id, payload.start_time)
+    appointment_end = appointment.start_time + timedelta(minutes=doctor.slot_duration_minutes or 30)
+    email_response = EmailService.send_email(
+        current_user.email,
+        "Appointment booked",
+        f"Your appointment with {doctor.name} is confirmed for {appointment.start_time.isoformat()}.",
+    )
+    calendar_response = CalendarService.create_event_for_appointment(
+        doctor.name,
+        current_user.patient_profile.full_name if current_user.patient_profile else current_user.email,
+        appointment.start_time,
+        appointment_end,
+    )
+    db.add(AuditLog(user_id=current_user.id, action="appointment_booked", details={
+        "doctor_id": payload.doctor_id,
+        "start_time": payload.start_time.isoformat(),
+        "email_status": email_response.get("status"),
+        "calendar_status": calendar_response.get("status"),
+    }))
+    db.add(Notification(recipient_user_id=current_user.id, title="Appointment booked", body=f"Your appointment with {doctor.name} is confirmed for {appointment.start_time.isoformat()}", channel="email", status="SENT" if email_response.get("status") == "sent" else "PENDING"))
     db.commit()
-    return {"id": appointment.id, "doctor_id": appointment.doctor_id, "patient_id": appointment.patient_id, "start_time": appointment.start_time.isoformat(), "status": appointment.status}
+    return {
+        "id": appointment.id,
+        "doctor_id": appointment.doctor_id,
+        "patient_id": appointment.patient_id,
+        "start_time": appointment.start_time.isoformat(),
+        "status": appointment.status,
+        "email": email_response,
+        "calendar": calendar_response,
+    }
 
 
 @router.get("")
@@ -80,8 +105,107 @@ def add_symptoms(appointment_id: str, payload: SymptomCreate, current_user: User
         additional_notes=payload.additional_notes,
     )
     db.add(symptom)
+    summary_payload = generate_pre_visit_summary(f"{payload.chief_complaint}. {payload.symptoms}. Duration: {payload.duration}. Severity: {payload.severity}. Notes: {payload.additional_notes}")
+    summary = PreVisitSummary(
+        appointment_id=appointment.id,
+        urgency_level=summary_payload.get("urgency_level"),
+        chief_complaint=summary_payload.get("chief_complaint"),
+        suggested_questions=summary_payload.get("suggested_questions", []),
+        provider_response=summary_payload,
+        status=summary_payload.get("status", "FAILED"),
+    )
+    db.add(summary)
     db.commit()
-    return {"id": symptom.id, "chief_complaint": symptom.chief_complaint}
+    return {"id": symptom.id, "chief_complaint": symptom.chief_complaint, "summary": summary_payload}
+
+
+@router.get("/{appointment_id}/pre-visit-summary")
+def get_pre_visit_summary(appointment_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    appointment = db.query(Appointment).filter(Appointment.id == appointment_id).first()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    if current_user.role == RoleEnum.PATIENT.value and appointment.patient_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    if current_user.role == RoleEnum.DOCTOR.value and appointment.doctor_id != current_user.doctor_profile.id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    summary = db.query(PreVisitSummary).filter(PreVisitSummary.appointment_id == appointment_id).first()
+    if not summary:
+        return {"status": "PENDING", "message": "No pre-visit summary available yet."}
+    return {"urgency_level": summary.urgency_level, "chief_complaint": summary.chief_complaint, "suggested_questions": summary.suggested_questions, "status": summary.status}
+
+
+@router.post("/{appointment_id}/clinical-notes")
+def add_clinical_notes(appointment_id: str, payload: ClinicalNoteCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    appointment = db.query(Appointment).filter(Appointment.id == appointment_id).first()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    if current_user.role != RoleEnum.DOCTOR.value or appointment.doctor_id != current_user.doctor_profile.id:
+        raise HTTPException(status_code=403, detail="Only the assigned doctor can add notes")
+
+    note = ClinicalNote(appointment_id=appointment.id, note_text=payload.note_text, diagnosis=payload.diagnosis)
+    db.add(note)
+    db.commit()
+    return {"id": note.id, "status": "saved"}
+
+
+@router.post("/{appointment_id}/prescription")
+def create_prescription(appointment_id: str, payload: PrescriptionCreate, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    appointment = db.query(Appointment).filter(Appointment.id == appointment_id).first()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    if current_user.role != RoleEnum.DOCTOR.value or appointment.doctor_id != current_user.doctor_profile.id:
+        raise HTTPException(status_code=403, detail="Only the assigned doctor can add prescriptions")
+
+    prescription = Prescription(appointment_id=appointment.id, doctor_id=appointment.doctor_id, follow_up_instructions=payload.follow_up_instructions)
+    db.add(prescription)
+    db.flush()
+    for med in payload.medications:
+        db.add(PrescriptionMedication(
+            prescription_id=prescription.id,
+            name=med.name,
+            dosage=med.dosage,
+            frequency=med.frequency,
+            duration=med.duration,
+            special_instructions=med.special_instructions,
+        ))
+    db.commit()
+    return {"id": prescription.id, "status": "saved"}
+
+
+@router.get("/{appointment_id}/post-visit-summary")
+def get_post_visit_summary(appointment_id: str, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    appointment = db.query(Appointment).filter(Appointment.id == appointment_id).first()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    if current_user.role == RoleEnum.PATIENT.value and appointment.patient_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    if current_user.role == RoleEnum.DOCTOR.value and appointment.doctor_id != current_user.doctor_profile.id:
+        raise HTTPException(status_code=403, detail="Not allowed")
+    summary = db.query(PostVisitSummary).filter(PostVisitSummary.appointment_id == appointment_id).first()
+    if not summary:
+        return {"summary": "No post-visit summary available yet.", "medication_schedule": [], "follow_up_steps": []}
+    return {"summary": summary.summary, "medication_schedule": summary.medication_schedule or [], "follow_up_steps": summary.follow_up_steps or []}
+
+
+@router.post("/{appointment_id}/post-visit-summary")
+def create_post_visit_summary(appointment_id: str, payload: dict, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    appointment = db.query(Appointment).filter(Appointment.id == appointment_id).first()
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    if current_user.role != RoleEnum.DOCTOR.value or appointment.doctor_id != current_user.doctor_profile.id:
+        raise HTTPException(status_code=403, detail="Only the assigned doctor can create a summary")
+
+    medication_data = payload.get("medication_schedule", [])
+    summary_payload = generate_post_visit_summary(payload.get("summary", "Follow-up instructions documented."), medication_data)
+    summary = PostVisitSummary(
+        appointment_id=appointment.id,
+        summary=summary_payload.get("summary", payload.get("summary", "Follow-up instructions documented.")),
+        medication_schedule=summary_payload.get("medication_schedule", medication_data),
+        follow_up_steps=summary_payload.get("follow_up_steps", []),
+    )
+    db.add(summary)
+    db.commit()
+    return {"status": "saved", "summary": summary_payload}
 
 
 @router.post("/{appointment_id}/cancel")

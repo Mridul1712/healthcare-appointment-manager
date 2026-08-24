@@ -111,3 +111,28 @@ class PostVisitSummaryOut(BaseModel):
     summary: str
     medication_schedule: Optional[List[dict]] = None
     follow_up_steps: Optional[List[str]] = None
+
+
+class DoctorProfileOut(BaseModel):
+    id: str
+    user_id: str
+    name: str
+    specialization: str
+    qualification: Optional[str] = None
+    experience_years: Optional[int] = 0
+    slot_duration_minutes: int = 30
+    is_active: bool = True
+
+
+class WorkingHourCreate(BaseModel):
+    weekday: int
+    start_time: str
+    end_time: str
+
+
+class AppointmentSummaryResponse(BaseModel):
+    urgency_level: Optional[str] = None
+    chief_complaint: Optional[str] = None
+    suggested_questions: Optional[List[str]] = None
+    status: Optional[str] = None
+    fallback: bool = False
